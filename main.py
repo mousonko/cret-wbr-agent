@@ -16,7 +16,7 @@ import sys
 
 from excel_parser import parse_excel
 from analyzer import analyze_with_bedrock, analyze_offline
-from report_generator import generate_word, generate_pptx
+from report_generator_v3 import generate_narrative_word, generate_narrative_pptx
 
 
 def main():
@@ -69,24 +69,29 @@ def main():
     print("=" * 60)
     print("Step 3: Generating reports...")
 
-    word_path = os.path.join(args.output_dir, "WBR_Bridge_Analysis.docx")
-    generate_word(analysis, word_path)
-    print(f"  Word report: {word_path}")
+    # Use empty wow dict for web app (no multi-sheet analysis)
+    wow = {}
 
-    pptx_path = os.path.join(args.output_dir, "WBR_Bridge_Analysis.pptx")
-    generate_pptx(analysis, pptx_path)
-    print(f"  PowerPoint: {pptx_path}")
+    word_path = os.path.join(args.output_dir, "WBR_Bridge_Analysis.docx")
+    generate_narrative_word(analysis, wow, args.output_dir)
+    print(f"  Word report: {os.path.join(args.output_dir, 'WBR_Bridge_Analysis_FINAL.docx')}")
+
+    generate_narrative_pptx(analysis, wow, args.output_dir)
+    print(f"  PowerPoint: {os.path.join(args.output_dir, 'WBR_Bridge_Analysis_FINAL.pptx')}")
 
     # 4. Print summary to console
     print("=" * 60)
     print("ANALYSIS SUMMARY")
     print("=" * 60)
     print(f"\n{analysis.get('executive_summary', '')}\n")
-    print("TOP 5 ROOT CAUSES:")
-    for rc in analysis.get("top_5_root_causes", []):
-        print(f"  #{rc['rank']} {rc['root_cause']}")
-        print(f"     Sites: {', '.join(rc.get('affected_sites', []))}")
-        print(f"     Actions: {'; '.join(rc.get('recommended_actions', []))}")
+    print("TOP ROOT CAUSES:")
+    for rc in analysis.get("top_root_causes_narrative", analysis.get("top_5_root_causes", [])):
+        if "title" in rc:
+            print(f"  RC{rc['rank']} {rc['title']} {rc['narrative']}")
+        else:
+            print(f"  #{rc['rank']} {rc['root_cause']}")
+            print(f"     Sites: {', '.join(rc.get('affected_sites', []))}")
+            print(f"     Actions: {'; '.join(rc.get('recommended_actions', []))}")
     print()
     print("WBR TALKING POINTS:")
     for pt in analysis.get("recommended_wbr_talking_points", []):

@@ -4,7 +4,7 @@ import boto3
 from excel_parser import SiteEntry
 
 
-def build_prompt(entries: list[SiteEntry]) -> str:
+def build_prompt(entries: list) -> str:
     sites_text = ""
     for e in entries:
         sites_text += f"""
@@ -60,7 +60,7 @@ Be specific, data-driven, and actionable. Group similar root causes together. Pr
 
 
 def analyze_with_bedrock(
-    entries: list[SiteEntry],
+    entries: list,
     region: str = "eu-west-1",
     model_id: str = "anthropic.claude-3-5-sonnet-20241022-v2:0",
 ) -> dict:
@@ -93,7 +93,7 @@ def analyze_with_bedrock(
     return {"raw_response": text}
 
 
-def analyze_offline(entries: list[SiteEntry]) -> dict:
+def analyze_offline(entries: list) -> dict:
     """Fallback: rule-based analysis without LLM."""
     from collections import Counter
 
@@ -139,14 +139,38 @@ def analyze_offline(entries: list[SiteEntry]) -> dict:
             "severity": "HIGH",
         })
 
+    bridged = [e for e in entries if e.bridge and e.bridge.strip()]
+    no_bridge = len(entries) - len(bridged)
+
+    # Build narrative root causes
+    narrative_causes = []
+    for rc in top_causes:
+        sites_str = ", ".join(rc["affected_sites"])
+        narrative_causes.append({
+            "rank": rc["rank"],
+            "title": f"{rc['root_cause']}:",
+            "narrative": (
+                f"{sites_str} — {rc['impact']}. "
+                f"Action: {'; '.join(rc['recommended_actions'])}. "
+                f"Owner: {rc['owner']}. ETA: {rc['timeline']}."
+            ),
+        })
+
     return {
         "executive_summary": f"{len(entries)} sites flagged for CRET scan compliance this week.",
         "total_flagged_sites": len(entries),
+        "sites_with_bridges": len(bridged),
+        "sites_without_bridges": no_bridge,
+        "bridge_summary": (
+            f"{len(entries)} sites flagged this week — {no_bridge} without bridges. "
+            f"Action: enforce bridge completion by next WBR. Owner: MSL."
+        ),
+        "top_root_causes_narrative": narrative_causes,
         "top_5_root_causes": top_causes,
         "site_summaries": site_summaries,
         "patterns_and_trends": "See individual bridges for details.",
         "recommended_wbr_talking_points": [
-            f"{len(entries)} sites flagged",
+            f"{len(entries)} sites flagged — {no_bridge} without bridges",
             f"Top root cause: {top_causes[0]['root_cause'] if top_causes else 'N/A'}",
         ],
     }
