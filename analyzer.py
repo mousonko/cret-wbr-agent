@@ -94,83 +94,141 @@ def analyze_with_bedrock(
 
 
 def analyze_offline(entries: list) -> dict:
-    """Fallback: rule-based analysis without LLM."""
-    from collections import Counter
+    """Smart offline analysis — clusters bridges by theme and generates narratives."""
+    from collections import Counter, defaultdict
 
-    bridges = [e.bridge for e in entries if e.bridge]
-    # Simple keyword-based root cause clustering
-    keywords = {
-        "staffing": ["staff", "headcount", "hiring", "capacity", "labor", "HC"],
-        "process_compliance": ["process", "training", "SOP", "compliance", "scan"],
-        "system_issues": ["system", "tool", "app", "device", "scanner", "IT"],
-        "volume_spike": ["volume", "peak", "surge", "demand", "spike"],
-        "returns_backlog": ["backlog", "RTS", "return", "pending", "aging"],
+    bridged = [e for e in entries if e.bridge and e.bridge.strip()]
+    no_bridge = [e for e in entries if not e.bridge or not e.bridge.strip()]
+    no_bridge_mps = Counter(e.mp for e in no_bridge)
+    top_no_bridge_mp = no_bridge_mps.most_common(1)[0][0] if no_bridge_mps else "N/A"
+
+    # Smarter keyword patterns with priorities
+    patterns = {
+        "bank_holiday_truck": {
+            "keywords": ["bank holiday", "BH", "holiday", "truck", "B2FC", "no truck", "adhoc", "ad-hoc", "pallet"],
+            "title": "Bank Holiday / No B2FC Truck — Items dwelling >7 days",
+            "action_template": "sites to raise ad-hoc truck request prior BH to avoid delay. Pre-BH truck scheduling SOP needed. Owner: {owner}. ETA: TBD.",
+        },
+        "backlog": {
+            "keywords": ["backlog", "BL", "collection", "CAP", "catch up", "clear floor", "insufficient"],
+            "title": "Backlog — Insufficient collection capacity",
+            "action_template": "Escalate to transport and align with Relo sites if adhoc sourcing fails. Owner: {owner}. ETA: TBD.",
+        },
+        "sop_3pl": {
+            "keywords": ["3PL", "3pl", "SOP", "depart scan missing", "missing depart", "wrong scan", "SA ", "training"],
+            "title": "SOP adherence / 3PL depart scan compliance gap",
+            "action_template": "Recommend weekly 3PL audit cadence. SAM to ensure SOP compliance by providing refresher training. Owner: SAM. ETA: TBD.",
+        },
+        "tech_system": {
+            "keywords": ["tech", "system", "app", "label", "P180", "infinity", "device", "crash", "bug", "IT"],
+            "title": "Tech / System issues",
+            "action_template": "Escalated and being monitored. SAM to confirm resolution. Owner: SAM/Tech. ETA: TBD.",
+        },
+        "volume": {
+            "keywords": ["volume", "spike", "surge", "peak", "high volume", "PPH"],
+            "title": "Volume spike — Capacity not adjusted",
+            "action_template": "Review staffing model vs volume forecast. Owner: Ops. ETA: TBD.",
+        },
+        "process_jedi": {
+            "keywords": ["JEDI", "virtual depart", "wrong", "stow", "FIFO", "misunderstanding"],
+            "title": "Process errors — JEDI / Virtual depart / FIFO",
+            "action_template": "Reinforce process training at affected stations. Owner: Ops. ETA: TBD.",
+        },
     }
 
-    cause_counts = Counter()
-    cause_sites = {k: [] for k in keywords}
+    cause_sites = defaultdict(list)
+    cause_entries = defaultdict(list)
+    matched_sites = set()
 
     for e in entries:
-        bridge_lower = (e.bridge + " " + e.deep_dive).lower()
-        for cause, kws in keywords.items():
-            if any(kw.lower() in bridge_lower for kw in kws):
-                cause_counts[cause] += 1
-                cause_sites[cause].append(e.ds)
+        text = e.bridge.lower() if e.bridge else ""
+        if not text:
+            continue
+        for cause_key, pattern in patterns.items():
+            if any(kw.lower() in text for kw in pattern["keywords"]):
+                if e.ds not in [s.ds for s in cause_entries[cause_key]]:
+                    cause_sites[cause_key].append(e.ds)
+                    cause_entries[cause_key].append(e)
+                    matched_sites.add(e.ds)
 
-    top_causes = []
-    for rank, (cause, count) in enumerate(cause_counts.most_common(5), 1):
-        top_causes.append({
+    # Build narrative root causes sorted by site count
+    sorted_causes = sorted(cause_sites.items(), key=lambda x: -len(x[1]))
+    narrative_causes = []
+    structured_causes = []
+
+    for rank, (cause_key, sites) in enumerate(sorted_causes[:5], 1):
+        pattern = patterns[cause_key]
+        entries_for_cause = cause_entries[cause_key]
+        mps = set(e.mp for e in entries_for_cause)
+        owner = "/".join(sorted(mps)) + " MSL"
+
+        # Build site detail string with compliance
+        site_details = []
+        for e in entries_for_cause:
+            try:
+                pct = f"{float(e.wk14_scan_compliance)*100:.0f}%"
+            except (ValueError, TypeError):
+                pct = e.wk14_scan_compliance
+            site_details.append(f"{e.ds} ({pct})")
+
+        sites_str = ", ".join(site_details)
+        action = pattern["action_template"].format(owner=owner)
+
+        narrative_causes.append({
             "rank": rank,
-            "root_cause": cause.replace("_", " ").title(),
-            "affected_sites": cause_sites[cause],
-            "impact": f"{count} sites affected",
-            "recommended_actions": ["Review site-level bridges for specific actions"],
-            "owner": "TBD",
+            "title": f"{pattern['title']}:",
+            "narrative": f"{sites_str} — {len(sites)} sites affected. {action}",
+        })
+
+        structured_causes.append({
+            "rank": rank,
+            "root_cause": pattern["title"],
+            "affected_sites": sites,
+            "impact": f"{len(sites)} sites affected",
+            "recommended_actions": [action],
+            "owner": owner,
             "timeline": "TBD",
         })
 
+    # Site summaries
     site_summaries = []
     for e in entries:
+        try:
+            pct = float(e.wk14_scan_compliance)
+            pct_str = f"{pct*100:.0f}%"
+            severity = "HIGH" if pct < 0.5 else "MEDIUM" if pct < 0.8 else "LOW"
+        except (ValueError, TypeError):
+            pct_str = e.wk14_scan_compliance
+            severity = "HIGH"
         site_summaries.append({
             "site": e.ds,
             "mp": e.mp,
-            "compliance": e.wk14_scan_compliance,
-            "bridge_summary": e.bridge[:100] if e.bridge else "No bridge provided",
-            "severity": "HIGH",
+            "compliance": pct_str,
+            "bridge_summary": e.bridge[:120] if e.bridge else "No bridge provided",
+            "severity": severity,
         })
 
-    bridged = [e for e in entries if e.bridge and e.bridge.strip()]
-    no_bridge = len(entries) - len(bridged)
-
-    # Build narrative root causes
-    narrative_causes = []
-    for rc in top_causes:
-        sites_str = ", ".join(rc["affected_sites"])
-        narrative_causes.append({
-            "rank": rc["rank"],
-            "title": f"{rc['root_cause']}:",
-            "narrative": (
-                f"{sites_str} — {rc['impact']}. "
-                f"Action: {'; '.join(rc['recommended_actions'])}. "
-                f"Owner: {rc['owner']}. ETA: {rc['timeline']}."
-            ),
-        })
+    site_summaries.sort(key=lambda s: s["compliance"])
 
     return {
-        "executive_summary": f"{len(entries)} sites flagged for CRET scan compliance this week.",
+        "executive_summary": (
+            f"{len(entries)} sites flagged for CRET scan compliance this week across "
+            f"{', '.join(f'{mp} ({c})' for mp, c in Counter(e.mp for e in entries).most_common())}. "
+            f"Only {len(bridged)} of {len(entries)} sites provided bridges — "
+            f"{len(no_bridge)} sites (primarily {top_no_bridge_mp}) have no bridge or POC assigned."
+        ),
         "total_flagged_sites": len(entries),
         "sites_with_bridges": len(bridged),
-        "sites_without_bridges": no_bridge,
+        "sites_without_bridges": len(no_bridge),
         "bridge_summary": (
-            f"{len(entries)} sites flagged this week — {no_bridge} without bridges. "
-            f"Action: enforce bridge completion by next WBR. Owner: MSL."
+            f"{len(entries)} sites flagged this week — {len(no_bridge)} without bridges, "
+            f"primarily {top_no_bridge_mp}. Action: enforce bridge completion by next WBR. "
+            f"Owner: {top_no_bridge_mp} MSL."
         ),
         "top_root_causes_narrative": narrative_causes,
-        "top_5_root_causes": top_causes,
+        "top_5_root_causes": structured_causes,
         "site_summaries": site_summaries,
-        "patterns_and_trends": "See individual bridges for details.",
         "recommended_wbr_talking_points": [
-            f"{len(entries)} sites flagged — {no_bridge} without bridges",
-            f"Top root cause: {top_causes[0]['root_cause'] if top_causes else 'N/A'}",
-        ],
+            f"{len(entries)} sites flagged — {len(no_bridge)} without bridges, primarily {top_no_bridge_mp}. Enforce bridge completion.",
+        ] + [f"RC{rc['rank']} {rc['title']} {rc['narrative'][:100]}..." for rc in narrative_causes[:3]],
     }
